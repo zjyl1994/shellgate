@@ -1,0 +1,22 @@
+ssh:
+  private_key_file: "~/.ssh/id_ed25519"
+  known_hosts_file: "~/.ssh/known_hosts"
+  connect_timeout: "10s"
+  command_timeout: "120s"
+  idle_timeout: "60s"
+hosts:
+  # example-host:
+  #   address: "192.0.2.10"
+  #   port: 22
+  #   user: "ops"
+  #   private_key_file: "~/.ssh/id_ed25519" # optional per-host override
+  #   known_hosts_file: "~/.ssh/known_hosts" # optional per-host override
+  #   description: "Example managed host"
+mcp:
+  listen: "127.0.0.1:8765"
+  ai_output_limit: 20000
+  auth: { enabled: true, token: "", token_file: "mcp_token" }
+audit:
+  directory: "logs"
+  filename_template: "{host}.jsonl"
+  output_limit: 524288

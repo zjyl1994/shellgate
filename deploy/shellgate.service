@@ -1,0 +1,13 @@
+[Unit]
+Description=ShellGate MCP SSH Broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/zjyl1994/go/bin/shellgate
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
