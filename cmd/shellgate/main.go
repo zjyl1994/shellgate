@@ -9,8 +9,6 @@ import (
 	"os"
 )
 
-const version = "0.1.0"
-
 func main() {
 	fs := flag.NewFlagSet("shellgate", flag.ExitOnError)
 	data := fs.String("data-dir", "", "ShellGate data directory")
@@ -30,7 +28,7 @@ func main() {
 	case "check":
 		e = app.Check(dir)
 	case "version":
-		fmt.Println(version)
+		fmt.Println(mcpserver.Version)
 	case "serve":
 		if _, x := os.Stat(dir + "/config.yaml"); os.IsNotExist(x) {
 			e = app.Init(dir)

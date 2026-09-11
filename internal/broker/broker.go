@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -18,12 +20,32 @@ import (
 )
 
 type Result struct {
-	OK         bool   `json:"ok"`
-	ExitCode   *int   `json:"exit_code,omitempty"`
-	Output     string `json:"output,omitempty"`
-	Truncated  bool   `json:"truncated"`
-	DurationMS int64  `json:"duration_ms"`
-	Error      string `json:"error,omitempty"`
+	OK           bool   `json:"ok"`
+	ExitCode     *int   `json:"exit_code,omitempty"`
+	Output       string `json:"output,omitempty"`
+	Truncated    bool   `json:"truncated"`
+	DurationMS   int64  `json:"duration_ms"`
+	Error        string `json:"error,omitempty"`
+	CleanupError string `json:"cleanup_error,omitempty"`
+}
+
+// HostResult associates an execution result with the managed host it was run
+// on. A result is returned for every requested host, including hosts that
+// could not be reached or are not configured.
+type HostResult struct {
+	Host string `json:"host"`
+	Result
+}
+
+// BatchResult is the result of running one command on multiple managed hosts.
+// Results keep the requested-host order even though execution is concurrent.
+type BatchResult struct {
+	Results        []HostResult `json:"results"`
+	HostsRequested int          `json:"hosts_requested"`
+	HostsOK        int          `json:"hosts_ok"`
+	HostsFailed    int          `json:"hosts_failed"`
+	Failed         []string     `json:"failed"`
+	Status         string       `json:"status"`
 }
 type managed struct {
 	mu       sync.Mutex
@@ -101,6 +123,221 @@ func (b *Broker) Exec(ctx context.Context, name, command string) Result {
 	_ = b.audit.Result(id, name, x, d, out, serr)
 	joined := combine(out.Text, serr.Text)
 	return Result{OK: true, ExitCode: &x, Output: limitOutput(joined, b.aiLimit), Truncated: out.Truncated || serr.Truncated || len(joined) > b.aiLimit, DurationMS: d.Milliseconds()}
+}
+
+// ExecMany runs command concurrently on every named host. It deliberately
+// waits for every execution so a failure on one host never hides the outcome
+// from another host.
+func (b *Broker) ExecMany(ctx context.Context, names []string, command string) BatchResult {
+	results := make([]HostResult, len(names))
+	var wg sync.WaitGroup
+	for i, name := range names {
+		wg.Add(1)
+		go func(i int, name string) {
+			defer wg.Done()
+			results[i] = HostResult{Host: name, Result: b.Exec(ctx, name, command)}
+		}(i, name)
+	}
+	wg.Wait()
+	return summarizeBatch(results)
+}
+
+// ExecScript uploads script to a random private temporary directory on name,
+// runs it with /bin/sh -se, and then removes the directory. Script text is
+// never interpolated into a remote command line.
+func (b *Broker) ExecScript(ctx context.Context, name, script string) Result {
+	h, ok := b.reg.Get(name)
+	if !ok {
+		return Result{Error: "unknown_host"}
+	}
+	id := requestID()
+	if e := b.audit.Script(id, name, script); e != nil {
+		return Result{Error: "internal_error"}
+	}
+	m := b.managed(name)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, b.command)
+	defer cancel()
+	if m.client == nil {
+		c, code := b.dial(ctx, h)
+		if code != "" {
+			_ = b.audit.Error(id, name, "connect", code, "not_started")
+			return Result{Error: code}
+		}
+		m.client = c
+	}
+	remoteDir := fmt.Sprintf("/tmp/shellgate-%s", id)
+	remotePath := remoteDir + "/script.sh"
+	if e := makeScriptDir(ctx, m.client, remoteDir); e != nil {
+		m.client.Close()
+		m.client = nil
+		code := "script_upload_failed"
+		if ctx.Err() != nil {
+			code = "command_timeout"
+		}
+		_ = b.audit.Error(id, name, "upload", code, "not_started")
+		return Result{Error: code, DurationMS: time.Since(started).Milliseconds()}
+	}
+	if e := writeScript(ctx, m.client, remotePath, script); e != nil {
+		_ = removeScript(ctx, m.client, remotePath, remoteDir)
+		m.client.Close()
+		m.client = nil
+		code := "script_upload_failed"
+		if ctx.Err() != nil {
+			code = "command_timeout"
+		}
+		_ = b.audit.Error(id, name, "upload", code, "not_started")
+		return Result{Error: code, DurationMS: time.Since(started).Milliseconds()}
+	}
+
+	stdout, stderr := newTailBuffer(b.audit.OutputLimit()), newTailBuffer(b.audit.OutputLimit())
+	cmd, e := m.client.CommandContext(ctx, "/bin/sh", "-se", remotePath)
+	if e == nil {
+		cmd.Stdout = stdout
+		cmd.Stderr = stderr
+		e = cmd.Run()
+	}
+	d := time.Since(started)
+	m.lastUsed = time.Now()
+	cleanupErr := removeScript(ctx, m.client, remotePath, remoteDir)
+	if cleanupErr != nil {
+		_ = b.audit.Error(id, name, "cleanup", "script_cleanup_failed", "unknown")
+	}
+	if ctx.Err() != nil {
+		m.client.Close()
+		m.client = nil
+		_ = b.audit.Error(id, name, "execute", "command_timeout", "unknown")
+		return Result{Error: "command_timeout", DurationMS: d.Milliseconds(), CleanupError: errorCode(cleanupErr)}
+	}
+	out, serr := b.audit.LimitTail(stdout.Bytes(), stdout.Total()), b.audit.LimitTail(stderr.Bytes(), stderr.Total())
+	if e != nil {
+		var xe *ssh.ExitError
+		if errors.As(e, &xe) {
+			x := xe.ExitStatus()
+			_ = b.audit.Result(id, name, x, d, out, serr)
+			joined := combine(out.Text, serr.Text)
+			return Result{OK: false, ExitCode: &x, Output: limitOutput(joined, b.aiLimit), Truncated: out.Truncated || serr.Truncated || len(joined) > b.aiLimit, DurationMS: d.Milliseconds(), CleanupError: errorCode(cleanupErr)}
+		}
+		m.client.Close()
+		m.client = nil
+		_ = b.audit.Error(id, name, "execute", "execution_state_unknown", "unknown")
+		return Result{Error: "execution_state_unknown", DurationMS: d.Milliseconds(), CleanupError: errorCode(cleanupErr)}
+	}
+	if cleanupErr != nil {
+		x := 0
+		joined := combine(out.Text, serr.Text)
+		return Result{ExitCode: &x, Output: limitOutput(joined, b.aiLimit), Truncated: out.Truncated || serr.Truncated || len(joined) > b.aiLimit, DurationMS: d.Milliseconds(), Error: "script_cleanup_failed", CleanupError: "script_cleanup_failed"}
+	}
+	x := 0
+	_ = b.audit.Result(id, name, x, d, out, serr)
+	joined := combine(out.Text, serr.Text)
+	return Result{OK: true, ExitCode: &x, Output: limitOutput(joined, b.aiLimit), Truncated: out.Truncated || serr.Truncated || len(joined) > b.aiLimit, DurationMS: d.Milliseconds()}
+}
+
+// ExecManyScript runs the same script concurrently on every named host.
+func (b *Broker) ExecManyScript(ctx context.Context, names []string, script string) BatchResult {
+	results := make([]HostResult, len(names))
+	var wg sync.WaitGroup
+	for i, name := range names {
+		wg.Add(1)
+		go func(i int, name string) {
+			defer wg.Done()
+			results[i] = HostResult{Host: name, Result: b.ExecScript(ctx, name, script)}
+		}(i, name)
+	}
+	wg.Wait()
+	return summarizeBatch(results)
+}
+
+func writeScript(ctx context.Context, c *goph.Client, path, script string) error {
+	return withSFTPContext(ctx, c, func() error {
+		ftp, err := c.NewSftp()
+		if err != nil {
+			return err
+		}
+		defer ftp.Close()
+		f, err := ftp.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
+		if err != nil {
+			return err
+		}
+		if _, err = f.Write([]byte(script)); err == nil {
+			err = f.Chmod(0700)
+		}
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+		return err
+	})
+}
+
+func makeScriptDir(ctx context.Context, c *goph.Client, dir string) error {
+	cmd, err := c.CommandContext(ctx, "mkdir", "-m", "700", dir)
+	if err != nil {
+		return err
+	}
+	return cmd.Run()
+}
+
+func removeScript(ctx context.Context, c *goph.Client, path, dir string) error {
+	return withSFTPContext(ctx, c, func() error {
+		ftp, err := c.NewSftp()
+		if err != nil {
+			return err
+		}
+		defer ftp.Close()
+		if err = ftp.Remove(path); err != nil {
+			return err
+		}
+		return ftp.RemoveDirectory(dir)
+	})
+}
+
+func withSFTPContext(ctx context.Context, c *goph.Client, operation func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- operation() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		// SFTP has no context-aware API. Closing its SSH transport unblocks the
+		// in-flight operation and prevents a timed-out upload from continuing.
+		_ = c.Close()
+		return ctx.Err()
+	}
+}
+
+func errorCode(err error) string {
+	if err != nil {
+		return "script_cleanup_failed"
+	}
+	return ""
+}
+
+func summarizeBatch(results []HostResult) BatchResult {
+	batch := BatchResult{
+		Results:        results,
+		HostsRequested: len(results),
+		Failed:         make([]string, 0),
+	}
+	for _, result := range results {
+		if result.OK {
+			batch.HostsOK++
+			continue
+		}
+		batch.HostsFailed++
+		batch.Failed = append(batch.Failed, result.Host)
+	}
+	switch {
+	case batch.HostsFailed == 0:
+		batch.Status = "ok"
+	case batch.HostsOK == 0:
+		batch.Status = "all_failed"
+	default:
+		batch.Status = "partial"
+	}
+	return batch
 }
 func (b *Broker) managed(n string) *managed {
 	b.clientsMu.Lock()

@@ -1,6 +1,8 @@
 package audit
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,10 +14,11 @@ import (
 )
 
 type Writer struct {
-	dir, template string
-	limit         int
-	mu            sync.Mutex
-	now           func() time.Time
+	dir, template       string
+	limit               int
+	recordScriptContent bool
+	mu                  sync.Mutex
+	now                 func() time.Time
 }
 type Output struct {
 	Text                      string
@@ -23,11 +26,26 @@ type Output struct {
 	OriginalBytes, SavedBytes int
 }
 
-func New(dir, template string, limit int) *Writer {
-	return &Writer{dir: dir, template: template, limit: limit, now: time.Now}
+func New(dir, template string, limit int, recordScriptContent bool) *Writer {
+	return &Writer{dir: dir, template: template, limit: limit, recordScriptContent: recordScriptContent, now: time.Now}
 }
 func (w *Writer) Command(id, host, command string) error {
 	return w.write(host, map[string]any{"ts": w.now().Format(time.RFC3339Nano), "event": "command", "request_id": id, "host": host, "command": command})
+}
+func (w *Writer) Script(id, host, script string) error {
+	digest := sha256.Sum256([]byte(script))
+	record := map[string]any{
+		"ts":            w.now().Format(time.RFC3339Nano),
+		"event":         "script",
+		"request_id":    id,
+		"host":          host,
+		"script_sha256": hex.EncodeToString(digest[:]),
+		"script_bytes":  len([]byte(script)),
+	}
+	if w.recordScriptContent {
+		record["script"] = script
+	}
+	return w.write(host, record)
 }
 func (w *Writer) Result(id, host string, exit int, d time.Duration, stdout, stderr Output) error {
 	return w.write(host, map[string]any{"ts": w.now().Format(time.RFC3339Nano), "event": "result", "request_id": id, "host": host, "exit_code": exit, "duration_ms": d.Milliseconds(), "stdout": stdout.Text, "stderr": stderr.Text, "stdout_truncated": stdout.Truncated, "stderr_truncated": stderr.Truncated, "stdout_original_bytes": stdout.OriginalBytes, "stderr_original_bytes": stderr.OriginalBytes, "stdout_saved_bytes": stdout.SavedBytes, "stderr_saved_bytes": stderr.SavedBytes})

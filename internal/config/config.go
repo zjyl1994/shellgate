@@ -39,10 +39,13 @@ mcp:
     enabled: true
     token: ""
     token_file: "mcp_token"
+    log_token: ""
+    log_token_file: "mcp_log_token"
 audit:
   directory: "logs"
   filename_template: "{host}.jsonl"
   output_limit: 524288
+  record_script_content: false
 `
 
 type Config struct {
@@ -72,14 +75,17 @@ type MCPConfig struct {
 	Auth          AuthConfig `yaml:"auth"`
 }
 type AuthConfig struct {
-	Enabled   bool   `yaml:"enabled"`
-	Token     string `yaml:"token,omitempty"`
-	TokenFile string `yaml:"token_file,omitempty"`
+	Enabled      bool   `yaml:"enabled"`
+	Token        string `yaml:"token,omitempty"`
+	TokenFile    string `yaml:"token_file,omitempty"`
+	LogToken     string `yaml:"log_token,omitempty"`
+	LogTokenFile string `yaml:"log_token_file,omitempty"`
 }
 type AuditConfig struct {
-	Directory        string `yaml:"directory"`
-	FilenameTemplate string `yaml:"filename_template"`
-	OutputLimit      int    `yaml:"output_limit"`
+	Directory           string `yaml:"directory"`
+	FilenameTemplate    string `yaml:"filename_template"`
+	OutputLimit         int    `yaml:"output_limit"`
+	RecordScriptContent bool   `yaml:"record_script_content"`
 }
 type RuntimeHost struct {
 	Name, Address, User, PrivateKeyFile, KnownHostsFile, Description string
@@ -87,7 +93,7 @@ type RuntimeHost struct {
 }
 type Runtime struct {
 	Config                                      Config
-	DataDir, Token, AuditDir                    string
+	DataDir, Token, LogToken, AuditDir          string
 	ConnectTimeout, CommandTimeout, IdleTimeout time.Duration
 	Hosts                                       map[string]RuntimeHost
 }
@@ -104,7 +110,10 @@ func Init(dataDir string) error {
 			return err
 		}
 	}
-	_, err := ensureToken(filepath.Join(dataDir, "mcp_token"))
+	if _, err := ensureToken(filepath.Join(dataDir, "mcp_token")); err != nil {
+		return err
+	}
+	_, err := ensureToken(filepath.Join(dataDir, "mcp_log_token"))
 	return err
 }
 func Load(dataDir string) (*Runtime, error) {
@@ -176,6 +185,21 @@ func Load(dataDir string) (*Runtime, error) {
 			if e != nil {
 				return nil, e
 			}
+		}
+		if c.MCP.Auth.LogToken != "" {
+			r.LogToken = c.MCP.Auth.LogToken
+		} else if c.MCP.Auth.LogTokenFile != "" {
+			p := paths.Resolve(dataDir, c.MCP.Auth.LogTokenFile)
+			if p == "" {
+				return nil, errors.New("log_token_file required")
+			}
+			r.LogToken, e = ensureToken(p)
+			if e != nil {
+				return nil, e
+			}
+		}
+		if r.LogToken != "" && r.LogToken == r.Token {
+			return nil, errors.New("log token must differ from execution token")
 		}
 	}
 	return r, nil

@@ -8,7 +8,7 @@ import (
 
 func TestMiddleware(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) })
-	h := Middleware(true, "secret", next)
+	h := Middleware(true, "secret", "logs", next)
 	for _, tc := range []struct {
 		header, origin string
 		want           int

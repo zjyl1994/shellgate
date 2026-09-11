@@ -15,8 +15,9 @@ hosts:
 mcp:
   listen: "127.0.0.1:8765"
   ai_output_limit: 20000
-  auth: { enabled: true, token: "", token_file: "mcp_token" }
+  auth: { enabled: true, token: "", token_file: "mcp_token", log_token: "", log_token_file: "mcp_log_token" }
 audit:
   directory: "logs"
   filename_template: "{host}.jsonl"
   output_limit: 524288
+  record_script_content: false # set true only when full script audit is required
