@@ -10,7 +10,7 @@ single `host` parameter remains supported. Batch results also include
 `hosts_requested`, `hosts_ok`, `hosts_failed`, `failed`, and an overall
 `status` of `ok`, `partial`, or `all_failed`.
 `ssh_exec_script` uploads a complete POSIX shell script into a private random
-temporary directory on every requested host, executes it using `/bin/sh -se`,
+temporary directory on every requested host, executes it using `/bin/sh -e`,
 then removes the directory. Script text is not interpolated into a remote
 command line.
 Its audit record contains only the script SHA-256 and byte count by default;

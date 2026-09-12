@@ -143,7 +143,7 @@ func (b *Broker) ExecMany(ctx context.Context, names []string, command string) B
 }
 
 // ExecScript uploads script to a random private temporary directory on name,
-// runs it with /bin/sh -se, and then removes the directory. Script text is
+// runs it with /bin/sh -e, and then removes the directory. Script text is
 // never interpolated into a remote command line.
 func (b *Broker) ExecScript(ctx context.Context, name, script string) Result {
 	h, ok := b.reg.Get(name)
@@ -193,7 +193,7 @@ func (b *Broker) ExecScript(ctx context.Context, name, script string) Result {
 	}
 
 	stdout, stderr := newTailBuffer(b.audit.OutputLimit()), newTailBuffer(b.audit.OutputLimit())
-	cmd, e := m.client.CommandContext(ctx, "/bin/sh", "-se", remotePath)
+	cmd, e := m.client.CommandContext(ctx, "/bin/sh", "-e", remotePath)
 	if e == nil {
 		cmd.Stdout = stdout
 		cmd.Stderr = stderr

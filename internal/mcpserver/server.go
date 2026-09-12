@@ -38,7 +38,7 @@ type auditQueryInput struct {
 
 // Version changes whenever the MCP tool surface or schemas change so clients
 // can invalidate cached tool metadata.
-const Version = "0.2.2"
+const Version = "0.2.3"
 
 func Handler(reg *hosts.Registry, b *broker.Broker, auditDir string, authEnabled bool, token, logToken string) http.Handler {
 	execServer := mcp.NewServer(&mcp.Implementation{Name: "ShellGate", Version: Version}, nil)
@@ -72,7 +72,7 @@ func Handler(reg *hosts.Registry, b *broker.Broker, auditDir string, authEnabled
 		}
 		return nil, res, nil
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "ssh_exec_script", Description: "Upload and run the same complete POSIX shell script concurrently on managed hosts. The script is written in a private random temporary directory and executed with /bin/sh -se, avoiding shell-quoting of the script text. The directory is removed after execution. The result always identifies each host's success or failure."}, func(ctx context.Context, _ *mcp.CallToolRequest, in scriptInput) (*mcp.CallToolResult, broker.BatchResult, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "ssh_exec_script", Description: "Upload and run the same complete POSIX shell script concurrently on managed hosts. The script is written in a private random temporary directory and executed with /bin/sh -e, avoiding shell-quoting of the script text. The directory is removed after execution. The result always identifies each host's success or failure."}, func(ctx context.Context, _ *mcp.CallToolRequest, in scriptInput) (*mcp.CallToolResult, broker.BatchResult, error) {
 		if len(in.Hosts) == 0 {
 			res := broker.BatchResult{Results: []broker.HostResult{{Result: broker.Result{Error: "missing_hosts"}}}, HostsFailed: 1, Failed: []string{""}, Status: "all_failed"}
 			raw, _ := json.Marshal(res)
